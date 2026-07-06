@@ -130,6 +130,18 @@ def clean_proxy_display(proxy: str | None) -> str:
     return p
 
 # ── Webhook ──────────────────────────────────────────────
+async def send_startup_webhook(webhook_url: str):
+    """Sends a one-off 'checker is live' notification when the script starts."""
+    if not webhook_url:
+        return
+    payload = {"content": "🟢 **Roblox Checker is Live and checking...**"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(webhook_url, json=payload, timeout=10) as resp:
+                pass
+    except:
+        pass
+
 async def send_webhook(session: aiohttp.ClientSession, webhook_url: str, username: str):
     embed = {
         "embeds": [{
@@ -533,6 +545,7 @@ def menu_settings():
 
 def main():
     show_banner()
+    asyncio.run(send_startup_webhook(WEBHOOK_URL))
     run_dictionary_default("words.txt")
 
 if __name__ == "__main__":
