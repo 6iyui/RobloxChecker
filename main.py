@@ -242,14 +242,17 @@ async def worker(queue: asyncio.Queue, session: aiohttp.ClientSession,
                 await send_webhook(session, WEBHOOK_URL, username)
                 recent_checks.append((username, "AVAILABLE ✅", proxy_display))
                 live_logs.append(f"🟢 FOUND AVAILABLE: '{username}'!")
+                print(f"[CHECK] {username} -> AVAILABLE", flush=True)
             elif result["status"] == "taken":
                 stats["taken"] += 1
                 recent_checks.append((username, "TAKEN ❌", proxy_display))
+                print(f"[CHECK] {username} -> taken", flush=True)
             elif result["status"] == "rate_limited":
                 stats["rate_limited"] += 1
                 retry_after = result.get("retry_after", 5)
                 recent_checks.append((username, "RATE LIMITED 🟠", proxy_display))
                 live_logs.append(f"⚠️ Rate limited on '{username}'. Waiting {retry_after:.0f}s")
+                print(f"[CHECK] {username} -> rate_limited (waiting {retry_after:.0f}s)", flush=True)
                 await asyncio.sleep(retry_after)
                 retries = result.get("_retries", 0)
                 if retries < MAX_RETRIES:
@@ -260,8 +263,10 @@ async def worker(queue: asyncio.Queue, session: aiohttp.ClientSession,
                 detail = result.get("detail", "Unknown")
                 recent_checks.append((username, f"ERROR ⚠️", proxy_display))
                 live_logs.append(f"❌ Error on '{username}': {detail}")
+                print(f"[CHECK] {username} -> error ({detail})", flush=True)
 
             stats["total_checked"] += 1
+            print(f"[PROGRESS] {stats['total_checked']}/{stats['total']} checked so far", flush=True)
             if result["status"] != "rate_limited":
                 await asyncio.sleep(delay)
         queue.task_done()
@@ -368,25 +373,32 @@ async def run_checks(usernames: list[str], concurrency: int, delay: float,
     cookie_jar = aiohttp.CookieJar()
 
     layout = make_layout()
-    live = Live(layout, refresh_per_second=4, console=console)
-    live.start()
+    is_tty = console.is_terminal
+    live = Live(layout, refresh_per_second=4, console=console) if is_tty else None
+    if live:
+        live.start()
+    else:
+        print("[SETUP] Non-interactive environment detected (e.g. Railway) — using plain-text logs instead of the live dashboard.", flush=True)
 
     async def update_dashboard():
         while True:
             render_dashboard(layout)
             await asyncio.sleep(0.25)
 
-    dashboard_task = asyncio.create_task(update_dashboard())
+    dashboard_task = asyncio.create_task(update_dashboard()) if is_tty else None
 
     async with aiohttp.ClientSession(cookie_jar=cookie_jar) as session:
         live_logs.append("🔑 Fetching CSRF token...")
+        print("[SETUP] Fetching CSRF token...", flush=True)
         csrf_token = await fetch_csrf_token(session, next(proxy_iter))
         if not csrf_token:
             live_logs.append("❌ Failed to obtain CSRF token.")
             stats["csrf_token"] = "FAILED"
+            print("[SETUP] Failed to obtain CSRF token.", flush=True)
         else:
             stats["csrf_token"] = csrf_token[:25] + "..."
             live_logs.append(f"✅ CSRF token obtained")
+            print("[SETUP] CSRF token obtained.", flush=True)
         csrf_token_ref = [csrf_token or ""]
 
         workers = []
@@ -398,12 +410,15 @@ async def run_checks(usernames: list[str], concurrency: int, delay: float,
             workers.append(task)
 
         live_logs.append(f"🚀 Started {concurrency} workers with {delay}s delay")
+        print(f"[SETUP] Started {concurrency} workers with {delay}s delay. Checking {len(usernames)} usernames total.", flush=True)
         await queue.join()
         for w in workers:
             w.cancel()
 
-    dashboard_task.cancel()
-    live.stop()
+    if dashboard_task:
+        dashboard_task.cancel()
+    if live:
+        live.stop()
 
     console.print(f"\n  [bold green]✅ Done![/]")
     console.print(f"  Available: [green]{stats['available']}[/] | Taken: [red]{stats['taken']}[/] | Errors: [yellow]{stats['errors']}[/] | Rate-limited: [orange1]{stats['rate_limited']}[/]")
