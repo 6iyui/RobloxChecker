@@ -37,8 +37,8 @@ console = Console()
 # ── Constants ────────────────────────────────────────────
 ROBLOX_VALIDATE_URL = "https://auth.roblox.com/v1/usernames/validate"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-DEFAULT_DELAY = 1.5
-DEFAULT_CONCURRENCY = 5
+DEFAULT_DELAY = 1
+DEFAULT_CONCURRENCY = 7
 MAX_RETRIES = 3
 WEBHOOK_URL = "https://discord.com/api/webhooks/1521918363423473807/VN06dum7TWhC273Qt243Z-Ub6urM-aL2VwJmkPx6Gyx2fLVM_GrpEELvRcJryDkFraJH"
 
