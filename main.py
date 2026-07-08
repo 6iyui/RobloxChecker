@@ -32,6 +32,31 @@ def random_birthday() -> str:
     delta = (end - start).days
     return (start + timedelta(days=random.randint(0, delta))).isoformat()
 
+async def get_csrf_token(session):
+    """Get CSRF token from Roblox."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Referer": "https://www.roblox.com/",
+        "Origin": "https://www.roblox.com",
+    }
+    payload = {"username": "testuser", "context": "Signup", "birthday": "1990-01-01"}
+    
+    try:
+        async with session.post(ROBLOX_VALIDATE_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            # The CSRF token is in the response headers
+            csrf_token = resp.headers.get("x-csrf-token")
+            if csrf_token:
+                log(f"✅ CSRF token obtained", "INFO")
+                return csrf_token
+            else:
+                log(f"⚠️ No CSRF token in response", "ERROR")
+                return None
+    except Exception as e:
+        log(f"❌ Failed to get CSRF token: {e}", "ERROR")
+        return None
+
 async def send_webhook(session, username):
     """IMMEDIATELY send webhook notification for available username."""
     embed = {
@@ -61,7 +86,7 @@ async def send_webhook(session, username):
         log(f"❌ Webhook error for '{username}': {e}", "WEBHOOK")
         return False
 
-async def check_username(session, username, retry_count=0):
+async def check_username(session, username, csrf_token, retry_count=0):
     """Check if a username is available on Roblox."""
     payload = {"username": username, "context": "Signup", "birthday": random_birthday()}
     headers = {
@@ -70,6 +95,7 @@ async def check_username(session, username, retry_count=0):
         "Accept": "application/json",
         "Referer": "https://www.roblox.com/",
         "Origin": "https://www.roblox.com",
+        "X-CSRF-TOKEN": csrf_token,
     }
     
     try:
@@ -81,35 +107,38 @@ async def check_username(session, username, retry_count=0):
                     return True  # Available
                 else:
                     return False  # Taken
+            elif resp.status == 403:
+                # CSRF token expired, get a new one
+                new_csrf = resp.headers.get("x-csrf-token")
+                if new_csrf:
+                    log(f"🔄 CSRF token renewed", "INFO")
+                    return await check_username(session, username, new_csrf, retry_count + 1)
+                else:
+                    log(f"❌ CSRF error, no new token", "ERROR")
+                    return False
             elif resp.status == 429:
-                log(f"Rate limited on '{username}', waiting 10s", "RATE")
+                log(f"⚠️ Rate limited on '{username}', waiting 10s", "RATE")
                 await asyncio.sleep(10)
                 if retry_count < 3:
-                    return await check_username(session, username, retry_count + 1)
-                return False
-            elif resp.status == 403:
-                log(f"CSRF error on '{username}', waiting 5s", "ERROR")
-                await asyncio.sleep(5)
-                if retry_count < 2:
-                    return await check_username(session, username, retry_count + 1)
+                    return await check_username(session, username, csrf_token, retry_count + 1)
                 return False
             else:
-                log(f"HTTP {resp.status} for '{username}'", "ERROR")
+                log(f"⚠️ HTTP {resp.status} for '{username}'", "ERROR")
                 if retry_count < 2:
                     await asyncio.sleep(2)
-                    return await check_username(session, username, retry_count + 1)
+                    return await check_username(session, username, csrf_token, retry_count + 1)
                 return False
     except asyncio.TimeoutError:
-        log(f"Timeout for '{username}', retrying", "ERROR")
+        log(f"⏰ Timeout for '{username}', retrying", "ERROR")
         if retry_count < 2:
             await asyncio.sleep(2)
-            return await check_username(session, username, retry_count + 1)
+            return await check_username(session, username, csrf_token, retry_count + 1)
         return False
     except Exception as e:
-        log(f"Exception for '{username}': {e}", "ERROR")
+        log(f"❌ Exception for '{username}': {e}", "ERROR")
         if retry_count < 2:
             await asyncio.sleep(2)
-            return await check_username(session, username, retry_count + 1)
+            return await check_username(session, username, csrf_token, retry_count + 1)
         return False
 
 async def main():
@@ -151,17 +180,26 @@ async def main():
     except Exception as e:
         log(f"⚠️ Startup notification failed: {e}", "WEBHOOK")
     
-    # Check each username
-    found = 0
-    start_time = time.time()
-    
+    # Create session for checking
     async with aiohttp.ClientSession() as session:
+        # Get initial CSRF token
+        log("🔑 Getting CSRF token...", "INFO")
+        csrf_token = await get_csrf_token(session)
+        
+        if not csrf_token:
+            log("❌ Failed to get CSRF token. Exiting.", "FATAL")
+            sys.exit(1)
+        
+        # Check each username
+        found = 0
+        start_time = time.time()
+        
         for i, username in enumerate(usernames, 1):
             log(f"🔍 Checking {i}/{len(usernames)}: {username}", "PROGRESS")
             
             try:
-                # Check username
-                is_available = await check_username(session, username)
+                # Check username with current CSRF token
+                is_available = await check_username(session, username, csrf_token)
                 
                 if is_available:
                     log(f"🎯 FOUND AVAILABLE: '{username}'!", "FOUND")
@@ -179,7 +217,8 @@ async def main():
             # Progress update every 10 checks
             if i % 10 == 0:
                 elapsed = time.time() - start_time
-                log(f"📊 Progress: {i}/{len(usernames)} checked, {found} found so far", "PROGRESS")
+                rate = i / elapsed if elapsed > 0 else 0
+                log(f"📊 Progress: {i}/{len(usernames)} checked ({rate:.1f}/s), {found} found so far", "PROGRESS")
             
             # Delay between checks
             await asyncio.sleep(DELAY)
