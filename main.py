@@ -606,7 +606,17 @@ def menu_settings():
 def main():
     show_banner()
     asyncio.run(send_startup_webhook(WEBHOOK_URL))
-    run_dictionary_default("words.txt")
+
+    wordlist_path = "words.txt"
+    if not Path(wordlist_path).exists():
+        print(f"[FATAL] '{wordlist_path}' not found in working directory: {os.getcwd()}", flush=True)
+        try:
+            print(f"[FATAL] Files present: {os.listdir('.')}", flush=True)
+        except Exception as e:
+            print(f"[FATAL] Could not list working directory: {e}", flush=True)
+        sys.exit(1)
+
+    run_dictionary_default(wordlist_path)
 
 if __name__ == "__main__":
     main()
