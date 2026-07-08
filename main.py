@@ -6,9 +6,9 @@ Interactive menu-driven username checker with:
 - Live status table (recent checks)
 - Live stats panel (taken/available/errors/rate-limited)
 - Live log panel (events like rate limits, CSRF renewals)
-- Webhook notifications
+- Webhook notifications (with proper error handling/retries)
 - Proxy support
-- NEW: Dictionary mode – check words from a list file
+- Dictionary mode – check words from a list file
 """
 
 import asyncio
@@ -41,6 +41,7 @@ DEFAULT_DELAY = 1
 DEFAULT_CONCURRENCY = 7
 MAX_RETRIES = 3
 WEBHOOK_URL = "https://discord.com/api/webhooks/1521918363423473807/VN06dum7TWhC273Qt243Z-Ub6urM-aL2VwJmkPx6Gyx2fLVM_GrpEELvRcJryDkFraJH"
+WEBHOOK_MAX_RETRIES = 3
 
 # ── Character sets ───────────────────────────────────────
 LETTERS = string.ascii_lowercase
@@ -61,7 +62,8 @@ stats = {
     "taken": 0, "available": 0, "errors": 0, "rate_limited": 0,
     "total_checked": 0, "total": 0, "start_time": None,
     "active_proxies": 0, "total_proxies": 0,
-    "csrf_token": ""
+    "csrf_token": "",
+    "webhook_sent": 0, "webhook_failed": 0,
 }
 
 # ── Helpers ──────────────────────────────────────────────
@@ -137,12 +139,22 @@ async def send_startup_webhook(webhook_url: str):
     payload = {"content": "🟢 **Roblox Checker is Live and checking...**"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json=payload, timeout=10) as resp:
-                pass
-    except:
-        pass
+            async with session.post(webhook_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 204:
+                    text = await resp.text()
+                    print(f"[WEBHOOK] Startup ping failed: HTTP {resp.status} - {text[:200]}", flush=True)
+    except Exception as e:
+        print(f"[WEBHOOK] Startup ping exception: {e}", flush=True)
 
 async def send_webhook(session: aiohttp.ClientSession, webhook_url: str, username: str):
+    """Sends an 'available username' notification to Discord.
+    Properly checks the response status, retries on Discord rate limits,
+    and logs failures instead of silently swallowing them.
+    """
+    if not webhook_url:
+        live_logs.append("⚠️ Webhook URL not set, skipping notification")
+        return
+
     embed = {
         "embeds": [{
             "title": "🟢 Available Roblox Username!",
@@ -156,11 +168,41 @@ async def send_webhook(session: aiohttp.ClientSession, webhook_url: str, usernam
             ],
         }]
     }
-    try:
-        async with session.post(webhook_url, json=embed, timeout=10) as resp:
-            pass
-    except:
-        pass
+
+    for attempt in range(WEBHOOK_MAX_RETRIES):
+        try:
+            async with session.post(
+                webhook_url, json=embed, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 204:
+                    stats["webhook_sent"] += 1
+                    return  # success
+                elif resp.status == 429:
+                    try:
+                        body = await resp.json()
+                        retry_after = float(body.get("retry_after", 1))
+                    except Exception:
+                        retry_after = 1.0
+                    live_logs.append(f"⚠️ Webhook rate limited, retrying in {retry_after:.1f}s")
+                    print(f"[WEBHOOK] Rate limited notifying '{username}', retrying in {retry_after:.1f}s", flush=True)
+                    await asyncio.sleep(retry_after)
+                    continue
+                else:
+                    text = await resp.text()
+                    stats["webhook_failed"] += 1
+                    live_logs.append(f"❌ Webhook failed ({resp.status}) for '{username}'")
+                    print(f"[WEBHOOK] Failed for '{username}': HTTP {resp.status} - {text[:200]}", flush=True)
+                    return
+        except Exception as e:
+            stats["webhook_failed"] += 1
+            live_logs.append(f"❌ Webhook error for '{username}': {str(e)[:50]}")
+            print(f"[WEBHOOK] Exception notifying '{username}': {e}", flush=True)
+            return
+
+    # Exhausted retries (kept getting 429s)
+    stats["webhook_failed"] += 1
+    live_logs.append(f"❌ Webhook gave up on '{username}' after {WEBHOOK_MAX_RETRIES} retries")
+    print(f"[WEBHOOK] Gave up notifying '{username}' after {WEBHOOK_MAX_RETRIES} retries", flush=True)
 
 # ── CSRF ─────────────────────────────────────────────────
 async def fetch_csrf_token(session: aiohttp.ClientSession, proxy: str | None = None) -> str:
@@ -335,6 +377,7 @@ def render_dashboard(layout: Layout):
 
   [dim]Proxies: {stats['active_proxies']}/{stats['total_proxies']} active[/]
   [dim]CSRF: {stats['csrf_token'] or 'N/A'}[/]
+  [dim]Webhook: {stats['webhook_sent']} sent / {stats['webhook_failed']} failed[/]
     """
     layout["stats"].update(Panel(stats_text.strip(), title="📊 Stats", border_style="green"))
 
@@ -352,7 +395,8 @@ async def run_checks(usernames: list[str], concurrency: int, delay: float,
     stats.update({
         "taken": 0, "available": 0, "errors": 0, "rate_limited": 0,
         "total_checked": 0, "total": len(usernames), "start_time": time.time(),
-        "active_proxies": 0, "total_proxies": 0, "csrf_token": ""
+        "active_proxies": 0, "total_proxies": 0, "csrf_token": "",
+        "webhook_sent": 0, "webhook_failed": 0,
     })
 
     with open(output_file, "w") as f:
@@ -422,6 +466,7 @@ async def run_checks(usernames: list[str], concurrency: int, delay: float,
 
     console.print(f"\n  [bold green]✅ Done![/]")
     console.print(f"  Available: [green]{stats['available']}[/] | Taken: [red]{stats['taken']}[/] | Errors: [yellow]{stats['errors']}[/] | Rate-limited: [orange1]{stats['rate_limited']}[/]")
+    console.print(f"  Webhook: [cyan]{stats['webhook_sent']} sent[/] / [red]{stats['webhook_failed']} failed[/]")
     if stats['available'] > 0:
         console.print(f"  [bold cyan]Available usernames saved to {output_file}[/]")
 
