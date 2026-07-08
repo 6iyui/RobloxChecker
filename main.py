@@ -66,6 +66,9 @@ stats = {
     "webhook_sent": 0, "webhook_failed": 0,
 }
 
+# ── Track checked usernames to prevent duplicates ─────────
+checked_usernames = set()
+
 # ── Helpers ──────────────────────────────────────────────
 def parse_pattern(pattern: str) -> list[tuple[int, str]]:
     segments = []
@@ -262,6 +265,13 @@ async def worker(queue: asyncio.Queue, session: aiohttp.ClientSession,
     
     while not queue.empty():
         username = await queue.get()
+        
+        # Skip if already checked
+        if username in checked_usernames:
+            queue.task_done()
+            continue
+        checked_usernames.add(username)
+        
         async with sem:
             csrf_token = csrf_token_ref[0]
             result = await check_username(session, username, csrf_token, proxy)
@@ -299,6 +309,8 @@ async def worker(queue: asyncio.Queue, session: aiohttp.ClientSession,
                 retries = result.get("_retries", 0)
                 if retries < MAX_RETRIES:
                     result["_retries"] = retries + 1
+                    # Remove from checked set so it can be retried
+                    checked_usernames.discard(username)
                     await queue.put(username)
             else:
                 stats["errors"] += 1
@@ -388,8 +400,9 @@ def render_dashboard(layout: Layout):
 # ── Main check runner ────────────────────────────────────
 async def run_checks(usernames: list[str], concurrency: int, delay: float,
                      proxy_file: str | None, output_file: str):
-    global available_found
+    global available_found, checked_usernames
     available_found = []
+    checked_usernames = set()  # Reset tracking for new run
     recent_checks.clear()
     live_logs.clear()
     stats.update({
@@ -585,7 +598,10 @@ def run_dictionary_default(wordlist_path: str = "words.txt"):
         console.print(f"  [red]❌ Failed to read file: {e}[/]")
         return
 
-    console.print(f"  Loaded [cyan]{len(usernames):,}[/] words from '{wordlist_path}'.")
+    # Remove duplicates and empty strings
+    usernames = list(dict.fromkeys([u for u in usernames if u]))
+    
+    console.print(f"  Loaded [cyan]{len(usernames):,}[/] unique words from '{wordlist_path}'.")
 
     concurrency = DEFAULT_CONCURRENCY
     delay = DEFAULT_DELAY
@@ -605,6 +621,8 @@ def menu_settings():
 
 def main():
     show_banner()
+    
+    # Only send startup webhook once
     asyncio.run(send_startup_webhook(WEBHOOK_URL))
 
     wordlist_path = "words.txt"
@@ -616,7 +634,12 @@ def main():
             print(f"[FATAL] Could not list working directory: {e}", flush=True)
         sys.exit(1)
 
+    # Run once and exit
     run_dictionary_default(wordlist_path)
+    
+    # Explicit exit to prevent any potential looping
+    print("\n[INFO] Script completed. Exiting...", flush=True)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
